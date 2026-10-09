@@ -1,0 +1,117 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+  DOTNET_NOLOGO: '1'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Work out the version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's:.*<AssemblyVersion>\(.*\)</AssemblyVersion>.*:\1:p' src/Jellyfin.Plugin.Taste/Jellyfin.Plugin.Taste.csproj)
+          if [[ "$GITHUB_REF" == refs/tags/v* && "${GITHUB_REF_NAME#v}" != "$version" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match AssemblyVersion $version in the csproj."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Test and package
+        run: ./build.sh --inside
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          OWNER: ${{ github.repository_owner }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jellyfin-plugin-taste_${{ steps.version.outputs.version }}
+          path: dist/jellyfin-plugin-taste_${{ steps.version.outputs.version }}.zip
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: jellyfin-plugin-taste_${{ needs.build.outputs.version }}
+          path: dist
+
+      - name: Checksums, release notes, and repository manifest
+        shell: bash
+        env:
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          name="jellyfin-plugin-taste_${VERSION}.zip"
+          zip="dist/$name"
+          md5=$(md5sum "$zip" | cut -d' ' -f1)
+          sha256=$(sha256sum "$zip" | cut -d' ' -f1)
+          echo "$md5  $name" > "$zip.md5"
+          echo "$sha256  $name" > "$zip.sha256"
+
+          changelog=$(awk -v v="$VERSION" 'index($0, "## " v) == 1 { found = 1; next } /^## / { found = 0 } found && (NF || text) { text = 1; print }' CHANGELOG.md)
+          if [[ -z "${changelog//[[:space:]]/}" ]]; then
+            changelog="See CHANGELOG.md."
+          fi
+          printf '%s\n\nMD5: `%s`\nSHA-256: `%s`\n' "$changelog" "$md5" "$sha256" > notes.md
+
+          unzip -p "$zip" meta.json > meta.json
+          jq --arg version "$VERSION" \
+             --arg changelog "$changelog" \
+             --arg sourceUrl "$REPO_URL/releases/download/$GITHUB_REF_NAME/$name" \
+             --arg checksum "$md5" \
+             '[{
+                guid, name, description, overview, owner, category,
+                versions: [{
+                  version: $version,
+                  changelog: $changelog,
+                  targetAbi,
+                  sourceUrl: $sourceUrl,
+                  checksum: $checksum,
+                  timestamp
+                }]
+              }]' meta.json > dist/manifest.json
+          cat dist/manifest.json
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/jellyfin-plugin-taste_${VERSION}.zip" \
+            "dist/jellyfin-plugin-taste_${VERSION}.zip.md5" \
+            "dist/jellyfin-plugin-taste_${VERSION}.zip.sha256" \
+            dist/manifest.json \
+            --title "Taste ${VERSION}" \
+            --notes-file notes.md

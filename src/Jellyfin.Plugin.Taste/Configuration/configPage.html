@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Taste</title>
+</head>
+<body>
+    <div id="TasteConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-checkbox">
+        <div data-role="content">
+            <div class="content-primary">
+                <form id="TasteConfigForm">
+                    <div class="verticalSection">
+                        <h2 class="sectionTitle">Rating dialog</h2>
+                        <div class="inputContainer">
+                            <label class="inputLabel inputLabelUnfocused" for="FallbackWindowPercent">Credits window when there is no outro segment (% of runtime)</label>
+                            <input id="FallbackWindowPercent" name="FallbackWindowPercent" type="number" is="emby-input" min="1" max="50" required />
+                            <div class="fieldDescription">Intro Skipper or Chapter Segments Provider gives exact credits. Without them, stopping in the last part of the runtime counts as the credits.</div>
+                        </div>
+                    </div>
+
+                    <div class="verticalSection">
+                        <h2 class="sectionTitle">Recommendations</h2>
+                        <div class="checkboxContainer checkboxContainer-withDescription">
+                            <label class="emby-checkbox-label">
+                                <input id="ShowHomeRows" name="ShowHomeRows" type="checkbox" is="emby-checkbox" />
+                                <span>Show Taste rows on the home screen</span>
+                            </label>
+                            <div class="fieldDescription checkboxFieldDescription">Adds "Movies for you", "Shows for you", and the rows of titles to request to the Jellyfin Web home screen, after Continue Watching and Next Up. Empty rows are left out. Each person can reorder or hide them under Taste → Sections. When this is off, the rows show on the Taste page instead.</div>
+                        </div>
+                        <div class="inputContainer">
+                            <label class="inputLabel inputLabelUnfocused" for="TmdbApiKey">TMDB API key or read access token (optional)</label>
+                            <input id="TmdbApiKey" name="TmdbApiKey" type="password" is="emby-input" autocomplete="off" />
+                            <div class="fieldDescription">Leave empty to use Seerr instead: Seerr already talks to TMDB, so setting the Seerr URL and API key below is enough. Responses are cached.</div>
+                        </div>
+                        <div class="checkboxContainer checkboxContainer-withDescription">
+                            <label class="emby-checkbox-label">
+                                <input id="EnableDiscover" name="EnableDiscover" type="checkbox" is="emby-checkbox" />
+                                <span>Show titles you do not have yet</span>
+                            </label>
+                            <div class="fieldDescription checkboxFieldDescription">Adds "New movies / New shows to request" (released in the last five months) and "More movies / More shows to request" (older) with titles you do not have yet. Needs Seerr or a TMDB key. Nothing is requested or downloaded automatically.</div>
+                        </div>
+                    </div>
+
+                    <div class="verticalSection">
+                        <h2 class="sectionTitle">Better picks (optional, free)</h2>
+                        <div class="inputContainer">
+                            <label class="inputLabel inputLabelUnfocused" for="TraktClientId">Trakt client ID</label>
+                            <input id="TraktClientId" name="TraktClientId" type="password" is="emby-input" autocomplete="off" />
+                            <div class="fieldDescription">From trakt.tv/oauth/applications → New application (any https redirect URI, e.g. <code>https://example.com/</code>; Taste never signs in to Trakt). Adds "fans of this also liked" lists and trending new shows. Only the client ID is needed.</div>
+                        </div>
+                        <div class="inputContainer">
+                            <label class="inputLabel inputLabelUnfocused" for="MdbListApiKey">MDBList API key</label>
+                            <input id="MdbListApiKey" name="MdbListApiKey" type="password" is="emby-input" autocomplete="off" />
+                            <div class="fieldDescription">From mdblist.com → Preferences → API key (free: 1,000 calls a day; Taste uses a few dozen). Adds IMDb, Rotten Tomatoes, Metacritic, and Trakt scores so weak titles are left out.</div>
+                        </div>
+                    </div>
+
+                    <div class="verticalSection">
+                        <h2 class="sectionTitle">Seerr</h2>
+                        <div class="inputContainer">
+                            <label class="inputLabel inputLabelUnfocused" for="SeerrUrl">Seerr URL</label>
+                            <input id="SeerrUrl" name="SeerrUrl" type="url" is="emby-input" placeholder="http://seerr:5055" />
+                            <div class="fieldDescription">Jellyseerr or Overseerr, as Jellyfin can reach it. Turns on the rows of titles to request, the Request button, and calibration posters.</div>
+                        </div>
+                        <div class="inputContainer">
+                            <label class="inputLabel inputLabelUnfocused" for="SeerrApiKey">Seerr API key</label>
+                            <input id="SeerrApiKey" name="SeerrApiKey" type="password" is="emby-input" autocomplete="off" />
+                            <div class="fieldDescription">From Seerr Settings → General. Requests are made as the signed-in person, so their Seerr quotas and approval rules still apply. Titles already available or requested in Seerr are marked or left out.</div>
+                        </div>
+                        <div class="checkboxContainer">
+                            <label class="emby-checkbox-label">
+                                <input id="SeerrRequestAllSeasons" name="SeerrRequestAllSeasons" type="checkbox" is="emby-checkbox" />
+                                <span>Request every season of a series (default is season 1)</span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div>
+                        <button is="emby-button" type="submit" class="raised button-submit block emby-button">
+                            <span>Save</span>
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+        <script type="text/javascript">
+            (function () {
+                var pluginId = 'a405b6d2-6f8d-4f15-bcac-0f4ca3ce59ec';
+                var page = document.querySelector('#TasteConfigPage');
+                var textFields = ['TmdbApiKey', 'TraktClientId', 'MdbListApiKey', 'SeerrUrl', 'SeerrApiKey'];
+                var checkFields = ['ShowHomeRows', 'EnableDiscover', 'SeerrRequestAllSeasons'];
+
+                page.addEventListener('pageshow', function () {
+                    Dashboard.showLoadingMsg();
+                    ApiClient.getPluginConfiguration(pluginId).then(function (config) {
+                        textFields.forEach(function (name) {
+                            page.querySelector('#' + name).value = config[name] || '';
+                        });
+                        checkFields.forEach(function (name) {
+                            page.querySelector('#' + name).checked = !!config[name];
+                        });
+                        page.querySelector('#FallbackWindowPercent').value = config.FallbackWindowPercent;
+                        Dashboard.hideLoadingMsg();
+                    });
+                });
+
+                page.querySelector('#TasteConfigForm').addEventListener('submit', function (e) {
+                    e.preventDefault();
+                    Dashboard.showLoadingMsg();
+                    ApiClient.getPluginConfiguration(pluginId).then(function (config) {
+                        textFields.forEach(function (name) {
+                            config[name] = page.querySelector('#' + name).value.trim();
+                        });
+                        checkFields.forEach(function (name) {
+                            config[name] = page.querySelector('#' + name).checked;
+                        });
+                        config.FallbackWindowPercent = parseInt(page.querySelector('#FallbackWindowPercent').value, 10) || 10;
+                        ApiClient.updatePluginConfiguration(pluginId, config).then(Dashboard.processPluginConfigurationUpdateResult);
+                    });
+                    return false;
+                });
+            })();
+        </script>
+    </div>
+</body>
+</html>

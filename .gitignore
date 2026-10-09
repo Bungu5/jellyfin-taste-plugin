@@ -1,0 +1,11 @@
+bin/
+obj/
+dist/
+TestResults/
+*.user
+.vs/
+.vscode/
+.idea/
+.nuget/
+*.swp
+.DS_Store

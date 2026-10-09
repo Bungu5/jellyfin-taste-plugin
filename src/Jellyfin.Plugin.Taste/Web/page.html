@@ -1,0 +1,20 @@
+<div class="tasteRoot"></div>
+<script>
+    (function () {
+        var root = document.currentScript && document.currentScript.previousElementSibling;
+        if (!root || !root.classList.contains('tasteRoot')) {
+            root = document.querySelector('.tasteRoot:not([data-taste-mounted])');
+        }
+        function mount() {
+            window.TasteUI.mount(root);
+        }
+        if (window.TasteUI) {
+            mount();
+            return;
+        }
+        var script = document.createElement('script');
+        script.src = ApiClient.getUrl('Taste/client.js');
+        script.onload = mount;
+        document.head.appendChild(script);
+    })();
+</script>
