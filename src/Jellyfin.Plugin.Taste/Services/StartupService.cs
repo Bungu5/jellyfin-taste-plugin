@@ -7,12 +7,13 @@ using Microsoft.Extensions.Logging;
 namespace Jellyfin.Plugin.Taste.Services;
 
 /// <summary>
-/// Registers the player script with JavaScript Injector and the Taste page with Plugin Pages.
-/// Both live in other plugins' load contexts, so they are called through reflection with their own JObject type.
+/// Registers the Taste page with Plugin Pages, and removes the script entry older versions left in JavaScript Injector
+/// (the web script now comes from <see cref="WebInjectionFilter"/>).
+/// Both live in other plugins' load contexts, so they are called through reflection.
 /// </summary>
 public sealed class StartupService : IHostedService, IDisposable
 {
-    private const string ScriptId = "taste-plugin-client";
+    private const string LegacyScriptId = "taste-plugin-client";
     private const string PageId = "taste-plugin-page";
     private const int Attempts = 12;
     private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(10);
@@ -39,26 +40,8 @@ public sealed class StartupService : IHostedService, IDisposable
 
     public void Dispose() => _stopping.Dispose();
 
-    internal static string LoaderScript(string version)
-        => "(function(){if(window.__tasteLoader){return;}window.__tasteLoader=true;" +
-           "var s=document.createElement('script');" +
-           $"s.src=ApiClient.getUrl('Taste/client.js')+'?v={version}';" +
-           "document.head.appendChild(s);})();";
-
     private async Task RegisterAsync(CancellationToken cancellationToken)
     {
-        var version = typeof(StartupService).Assembly.GetName().Version?.ToString() ?? "0";
-        var script = JsonSerializer.Serialize(new Dictionary<string, object>
-        {
-            ["id"] = ScriptId,
-            ["name"] = "Taste rating dialog",
-            ["script"] = LoaderScript(version),
-            ["enabled"] = true,
-            ["requiresAuthentication"] = true,
-            ["pluginId"] = Plugin.PluginGuid,
-            ["pluginName"] = "Taste",
-            ["pluginVersion"] = version,
-        });
         var page = JsonSerializer.Serialize(new Dictionary<string, object>
         {
             ["id"] = PageId,
@@ -67,22 +50,22 @@ public sealed class StartupService : IHostedService, IDisposable
             ["icon"] = "thumbs_up_down",
         });
 
-        var scriptDone = false;
+        var legacyDone = false;
         var pageDone = false;
-        for (var attempt = 1; attempt <= Attempts && !(scriptDone && pageDone); attempt++)
+        for (var attempt = 1; attempt <= Attempts && !(legacyDone && pageDone); attempt++)
         {
-            scriptDone = scriptDone || TryInvoke(
+            legacyDone = legacyDone || TryInvoke(
                 "Jellyfin.Plugin.JavaScriptInjector",
                 "Jellyfin.Plugin.JavaScriptInjector.PluginInterface",
-                "RegisterScript",
-                script);
+                "UnregisterScript",
+                _ => LegacyScriptId);
             pageDone = pageDone || TryInvoke(
                 "Jellyfin.Plugin.PluginPages",
                 "Jellyfin.Plugin.PluginPages.PluginInterface",
                 "RegisterPage",
-                page);
+                payloadType => ParseJson(payloadType, page));
 
-            if (!(scriptDone && pageDone))
+            if (!(legacyDone && pageDone))
             {
                 try
                 {
@@ -95,20 +78,16 @@ public sealed class StartupService : IHostedService, IDisposable
             }
         }
 
-        if (!scriptDone)
-        {
-            _logger.LogWarning(
-                "Taste: JavaScript Injector not found. Install it, or add this script to it by hand: {Script}",
-                LoaderScript(version));
-        }
-
         if (!pageDone)
         {
             _logger.LogInformation("Taste: Plugin Pages not found. The Taste page is still reachable from the header button.");
         }
     }
 
-    private bool TryInvoke(string assemblyName, string typeName, string methodName, string json)
+    private static object? ParseJson(Type payloadType, string json)
+        => payloadType.GetMethod("Parse", BindingFlags.Public | BindingFlags.Static, [typeof(string)])?.Invoke(null, [json]);
+
+    private bool TryInvoke(string assemblyName, string typeName, string methodName, Func<Type, object?> argument)
     {
         try
         {
@@ -116,20 +95,14 @@ public sealed class StartupService : IHostedService, IDisposable
                 .SelectMany(context => context.Assemblies)
                 .FirstOrDefault(a => a.GetName().Name == assemblyName);
             var method = assembly?.GetType(typeName)?.GetMethod(methodName, BindingFlags.Public | BindingFlags.Static);
-            if (method is null)
+            var value = method is null ? null : argument(method.GetParameters()[0].ParameterType);
+            if (value is null)
             {
                 return false;
             }
 
-            var payloadType = method.GetParameters()[0].ParameterType;
-            var parse = payloadType.GetMethod("Parse", BindingFlags.Public | BindingFlags.Static, [typeof(string)]);
-            if (parse is null)
-            {
-                return false;
-            }
-
-            method.Invoke(null, [parse.Invoke(null, [json])]);
-            _logger.LogInformation("Taste: registered with {Plugin}", assemblyName);
+            method!.Invoke(null, [value]);
+            _logger.LogDebug("Taste: called {Plugin}.{Method}", assemblyName, methodName);
             return true;
         }
         catch (Exception ex) when (ex is TargetInvocationException or InvalidOperationException or ArgumentException)

@@ -2,6 +2,10 @@
 
 Versions use Jellyfin's four-part plugin numbering.
 
+## 0.6.2.0
+
+- The web script now loads on every page view. Taste adds its own loader to Jellyfin Web's page as it is served, instead of relying on JavaScript Injector, which on some servers never ran it: the home rows, home order, and header button only appeared after opening the Taste page, and were gone again after a refresh. JavaScript Injector and File Transformation are no longer needed; the old "Taste rating dialog" entry is removed from JavaScript Injector at startup.
+
 ## 0.6.1.0
 
 - Export and import on the Profile tab: move your stars, thumbs, "Not for me" titles, and calibration answers to another server. Titles are matched by TMDB, IMDb, or TVDB id; import only fills gaps and never replaces a rating already on the server.

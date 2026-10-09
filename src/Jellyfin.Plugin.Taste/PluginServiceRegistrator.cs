@@ -2,6 +2,7 @@ using Jellyfin.Plugin.Taste.Data;
 using Jellyfin.Plugin.Taste.Services;
 using MediaBrowser.Controller;
 using MediaBrowser.Controller.Plugins;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace Jellyfin.Plugin.Taste;
@@ -25,5 +26,6 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
         serviceCollection.AddSingleton<CalibrationService>();
         serviceCollection.AddSingleton<TransferService>();
         serviceCollection.AddHostedService<StartupService>();
+        serviceCollection.AddSingleton<IStartupFilter, WebInjectionFilter>();
     }
 }

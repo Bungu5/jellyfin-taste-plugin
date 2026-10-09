@@ -34,7 +34,7 @@ The dialog and rows only exist in Jellyfin Web (the browser, and desktop apps th
 ## Requirements
 
 - **Jellyfin 12.1.x.** The plugin is built against the Jellyfin 12.1.0 packages and declares `targetAbi` 12.1.0.0, so Jellyfin will not load it on older servers. The .NET runtime ships with Jellyfin; nothing else to install.
-- **[JavaScript Injector](https://github.com/n00bcodr/Jellyfin-JavaScript-Injector)** (strongly recommended). Taste registers its web script with it automatically at startup. Without it, the server still works, but the dialog, rows, and Taste page only appear if you add the script yourself (see [Troubleshooting](#the-dialog-or-rows-never-appear)). JavaScript Injector in turn needs either **File Transformation** or a writable `index.html` in Jellyfin Web; the official Docker image keeps it read-only, so install File Transformation there.
+- Nothing else for the web side. Taste adds its script to Jellyfin Web's page itself as the page is served, so it doesn't need JavaScript Injector or File Transformation and works with the read-only web folder in the official Docker image.
 - **Plugin Pages** (optional) adds a "Taste" entry to Jellyfin Web's menu. The header button works without it.
 - **A media segment provider** (optional) such as Intro Skipper, or Chapter Segments Provider for chapters named like credits. With an outro segment, "in the credits" is exact; without one, the last 10% of the runtime counts.
 
@@ -56,13 +56,13 @@ Without any of them, only *Movies for you* and *Shows for you* appear.
 1. Download `jellyfin-plugin-taste_<version>.zip` from the [Releases page](https://github.com/Bungu5/jellyfin-taste-plugin/releases) and check it against the `.md5` or `.sha256` file next to it.
 2. Stop Jellyfin.
 3. Unzip it into a new folder named `Taste_<version>` inside Jellyfin's `plugins` folder. Typical locations:
-   - Debian or Ubuntu packages: `/var/lib/jellyfin/plugins/Taste_0.6.1.0/`
-   - Official Docker image: `/config/plugins/Taste_0.6.1.0/` inside the container
-   - Windows: `%PROGRAMDATA%\Jellyfin\Server\plugins\Taste_0.6.1.0\`
+   - Debian or Ubuntu packages: `/var/lib/jellyfin/plugins/Taste_0.6.2.0/`
+   - Official Docker image: `/config/plugins/Taste_0.6.2.0/` inside the container
+   - Windows: `%PROGRAMDATA%\Jellyfin\Server\plugins\Taste_0.6.2.0\`
 
    The folder should contain `Jellyfin.Plugin.Taste.dll` and `meta.json`. If you are upgrading, remove the old `Taste_*` folder.
-4. Make sure the Jellyfin service user can read the files, for example `sudo chown -R jellyfin:jellyfin /var/lib/jellyfin/plugins/Taste_0.6.1.0`.
-5. Start Jellyfin. The log should show `Taste: registered with Jellyfin.Plugin.JavaScriptInjector`.
+4. Make sure the Jellyfin service user can read the files, for example `sudo chown -R jellyfin:jellyfin /var/lib/jellyfin/plugins/Taste_0.6.2.0`.
+5. Start Jellyfin. After the first page load, the log should show `Taste: added the web loader to Jellyfin Web`.
 6. Open Dashboard, Plugins, Taste, and fill in the settings you want.
 7. Reload Jellyfin Web in your browser (a hard refresh, Ctrl+F5, is safest).
 
@@ -90,7 +90,7 @@ cd jellyfin-plugin-taste
 
 ### Uninstalling
 
-Delete the `Taste_<version>` folder and restart Jellyfin. Stars stay in Jellyfin as normal user ratings, and home screen changes made in the Sections tab stay in each person's Jellyfin settings. Delete `taste.db` from Jellyfin's data folder to remove the rest. If JavaScript Injector still lists "Taste rating dialog", remove it there.
+Delete the `Taste_<version>` folder and restart Jellyfin. Stars stay in Jellyfin as normal user ratings, and home screen changes made in the Sections tab stay in each person's Jellyfin settings. Delete `taste.db` from Jellyfin's data folder to remove the rest.
 
 ## Configuration
 
@@ -194,8 +194,8 @@ No usernames, ratings, or watch history are sent to TMDB, Trakt, or MDBList; the
 
 ### The dialog or rows never appear
 
-- Check the Jellyfin log at startup for `Taste: registered with Jellyfin.Plugin.JavaScriptInjector`. If you see `Taste: JavaScript Injector not found` instead, install JavaScript Injector, or add the one-line loader printed in that warning to it by hand.
-- In Docker, JavaScript Injector also needs File Transformation, because the image's `index.html` is read-only.
+- Check the Jellyfin log for `Taste: added the web loader to Jellyfin Web` after opening Jellyfin Web. In the browser, view the page source: the end of the page should contain `<!-- Taste plugin -->`.
+- If a reverse proxy or CDN caches `/web/index.html`, purge it after installing, or the old page without the loader keeps being served.
 - Hard-refresh Jellyfin Web (Ctrl+F5) after installing or upgrading.
 - Native apps never show the dialog or rows. Use Jellyfin Web.
 - The rows only fill in once a person has some signal: rate a few titles in Taste, Calibrate. Empty rows are left off the home screen.
@@ -255,7 +255,7 @@ Layout:
   - `Configuration/` settings and the admin page
   - `Data/` the SQLite store and the calibration deck
   - `Scoring/` ingredients, vector math, credits and finale rules, TMDB genre ids
-  - `Services/` profile, recommendations, discovery, Seerr/TMDB/Trakt/MDBList clients, the scheduled task, and the startup registration with JavaScript Injector and Plugin Pages
+  - `Services/` profile, recommendations, discovery, Seerr/TMDB/Trakt/MDBList clients, the scheduled task, the `index.html` loader (`WebInjectionFilter`), and the startup registration with Plugin Pages
   - `Web/` `client.js` (plain ES5-style JavaScript, no build step) and the Taste page fragment
 - `tests/` xUnit tests for scoring, profile, discovery, parsing, and the store
 - `build.sh`, `build/zip.proj` packaging; `.github/workflows/build.yml` CI and releases
