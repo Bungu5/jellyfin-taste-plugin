@@ -23,7 +23,7 @@ Taste is a Jellyfin server plugin that asks people what they thought of a movie 
 - **Not for me** hides a title from every row and counts as a mild dislike. An Undo button appears for a few seconds, and the Calibrate tab lists everything you have hidden.
 - **The Taste page**, opened from the thumbs icon in the header (and from the menu if Plugin Pages is installed), has these tabs:
   - **Calibrate**: "Have you seen these?" (well-known titles to rate if you have seen them), "Rate five you finished" (titles you finished but never scored), and your hidden titles.
-  - **Profile**: what you lean towards and what you steer away from, as genre, theme, people, studio, language, and era chips.
+  - **Profile**: what you lean towards and what you steer away from, as genre, theme, people, studio, language, and era chips. **Export** and **Import** move your ratings to another Jellyfin server (see below).
   - **Sections**: every home screen section, Jellyfin's own (My media, Continue watching, Next up, Recently added media, and so on) and Taste's rows, with a drag handle (arrow keys work too) and an on/off switch. Recently added media also gets a switch per library ("Latest Movies", "Latest Shows", ...). Saving writes Jellyfin's own home screen settings for your account, so they show up under Settings, Home screen, too, and reloads the page.
   - **For you**: the recommendation rows, shown here only when an admin has switched home rows off.
 
@@ -56,12 +56,12 @@ Without any of them, only *Movies for you* and *Shows for you* appear.
 1. Download `jellyfin-plugin-taste_<version>.zip` from the [Releases page](https://github.com/Bungu5/jellyfin-taste-plugin/releases) and check it against the `.md5` or `.sha256` file next to it.
 2. Stop Jellyfin.
 3. Unzip it into a new folder named `Taste_<version>` inside Jellyfin's `plugins` folder. Typical locations:
-   - Debian or Ubuntu packages: `/var/lib/jellyfin/plugins/Taste_0.6.0.0/`
-   - Official Docker image: `/config/plugins/Taste_0.6.0.0/` inside the container
-   - Windows: `%PROGRAMDATA%\Jellyfin\Server\plugins\Taste_0.6.0.0\`
+   - Debian or Ubuntu packages: `/var/lib/jellyfin/plugins/Taste_0.6.1.0/`
+   - Official Docker image: `/config/plugins/Taste_0.6.1.0/` inside the container
+   - Windows: `%PROGRAMDATA%\Jellyfin\Server\plugins\Taste_0.6.1.0\`
 
    The folder should contain `Jellyfin.Plugin.Taste.dll` and `meta.json`. If you are upgrading, remove the old `Taste_*` folder.
-4. Make sure the Jellyfin service user can read the files, for example `sudo chown -R jellyfin:jellyfin /var/lib/jellyfin/plugins/Taste_0.6.0.0`.
+4. Make sure the Jellyfin service user can read the files, for example `sudo chown -R jellyfin:jellyfin /var/lib/jellyfin/plugins/Taste_0.6.1.0`.
 5. Start Jellyfin. The log should show `Taste: registered with Jellyfin.Plugin.JavaScriptInjector`.
 6. Open Dashboard, Plugins, Taste, and fill in the settings you want.
 7. Reload Jellyfin Web in your browser (a hard refresh, Ctrl+F5, is safest).
@@ -173,6 +173,12 @@ For the ten titles a person likes most (and their four strongest stated dislikes
 - Everything else lives in one SQLite file, `taste.db`, in Jellyfin's data folder (for example `/var/lib/jellyfin/data/taste.db`, or `/config/data/taste.db` in Docker): thumbs, "already asked", Not for me, calibration answers, scores for titles outside the library, saved rows, and the response cache.
 - The Sections tab writes each person's Jellyfin display preferences (`homesection0` to `homesection9`, plus a `taste-home` entry holding the full order including Taste rows) and their per-library "Latest" switches (`LatestItemsExcludes`).
 
+### Moving to another server
+
+`taste.db` can't simply be copied: item and user ids differ between servers. Instead, open **Taste → Profile** on the old server and click **Export** to download a JSON file with your stars, thumbs, Not for me titles, and calibration answers, each title carrying its TMDB, IMDb, and TVDB ids. On the new server, sign in as the person who should get them, open the same tab, and click **Import**.
+
+Titles in the new library are matched by those ids and get their stars written to Jellyfin; the rest are kept as titles outside the library. Import only fills gaps: stars, thumbs, and Not for me already set on the new server are never replaced, so importing the same file twice is harmless. Watch history isn't included; Jellyfin has its own tools for that.
+
 ## Privacy
 
 Taste has no telemetry and talks to nothing except the services you configure. Exactly what leaves your server:
@@ -233,6 +239,7 @@ All routes are under `/Taste` and use the caller's Jellyfin session unless noted
 | `GET Calibration/Seen`, `POST Calibration/Seen` | The "Have you seen these?" cards, and an answer |
 | `GET Calibration/Finished` | Finished titles without a score |
 | `POST Request` `{MediaType, TmdbId}` | Request a title in Seerr as this person |
+| `GET Export`, `POST Import` | Download this person's ratings as JSON; merge such a file into this person on this server |
 
 ## Development
 

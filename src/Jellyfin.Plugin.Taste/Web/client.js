@@ -829,7 +829,59 @@
             }
         }).catch(function () {
             notice.textContent = 'Could not load your profile.';
+        }).then(function () {
+            view.appendChild(transferBlock());
         });
+    }
+
+    function transferBlock() {
+        var block = el('div');
+        block.appendChild(el('h2', 'taste-row-title', 'Move your ratings'));
+        var notice = el('div', 'taste-notice', 'Export saves your stars, thumbs, "Not for me" titles, and calibration answers to a file. '
+            + 'Import adds a file like that to your account on this server, matching titles by their TMDB, IMDb, or TVDB ids. '
+            + 'Anything you have already rated here is kept as it is.');
+        block.appendChild(notice);
+
+        var picker = el('input');
+        picker.type = 'file';
+        picker.accept = '.json,application/json';
+        picker.style.display = 'none';
+        picker.addEventListener('change', function () {
+            var file = picker.files && picker.files[0];
+            picker.value = '';
+            if (!file) {
+                return;
+            }
+            file.text().then(function (text) {
+                return post('Taste/Import', JSON.parse(text), true);
+            }).then(function (r) {
+                notice.textContent = 'Imported: ' + r.InLibrary + ' titles in this library, ' + r.Outside + ' titles you do not have, '
+                    + r.Calibration + ' calibration answers. ' + r.AlreadyRated + ' were already rated here and left alone'
+                    + (r.Skipped ? ', ' + r.Skipped + ' could not be matched.' : '.');
+                toast('Ratings imported');
+            }).catch(function () {
+                toast('That file could not be imported');
+            });
+        });
+
+        var actions = el('div', 'taste-card-actions');
+        actions.appendChild(button('Export', '', function () {
+            getJson('Taste/Export').then(function (data) {
+                var link = el('a');
+                link.href = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
+                link.download = 'taste-export-' + new Date().toISOString().slice(0, 10) + '.json';
+                document.body.appendChild(link);
+                link.click();
+                link.remove();
+                setTimeout(function () { URL.revokeObjectURL(link.href); }, 10000);
+            }).catch(function () {
+                toast('Could not export your ratings');
+            });
+        }, 'download'));
+        actions.appendChild(button('Import', '', function () { picker.click(); }, 'upload'));
+        block.appendChild(actions);
+        block.appendChild(picker);
+        return block;
     }
 
     // ---------- home section order ----------

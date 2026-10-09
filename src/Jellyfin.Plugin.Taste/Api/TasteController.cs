@@ -106,6 +106,7 @@ public class TasteController : ControllerBase
     private readonly SeerrClient _seerr;
     private readonly TmdbClient _tmdb;
     private readonly LibraryIndex _index;
+    private readonly TransferService _transfer;
 
     public TasteController(
         IUserManager userManager,
@@ -117,7 +118,8 @@ public class TasteController : ControllerBase
         CalibrationService calibration,
         SeerrClient seerr,
         TmdbClient tmdb,
-        LibraryIndex index)
+        LibraryIndex index,
+        TransferService transfer)
     {
         _userManager = userManager;
         _prompts = prompts;
@@ -129,6 +131,7 @@ public class TasteController : ControllerBase
         _seerr = seerr;
         _tmdb = tmdb;
         _index = index;
+        _transfer = transfer;
     }
 
     [HttpGet("client.js")]
@@ -428,6 +431,45 @@ public class TasteController : ControllerBase
             _discovery.Invalidate(user.Id);
         }
 
+        return result;
+    }
+
+    [HttpGet("Export")]
+    [Authorize]
+    public async Task<ActionResult<TasteExport>> Export(CancellationToken cancellationToken)
+    {
+        var user = CurrentUser();
+        if (user is null)
+        {
+            return Unauthorized();
+        }
+
+        return await _transfer.ExportAsync(user, cancellationToken).ConfigureAwait(false);
+    }
+
+    [HttpPost("Import")]
+    [Authorize]
+    [RequestSizeLimit(64_000_000)]
+    public async Task<ActionResult<ImportResult>> Import([FromBody, Required] TasteExport export, CancellationToken cancellationToken)
+    {
+        var user = CurrentUser();
+        if (user is null)
+        {
+            return Unauthorized();
+        }
+
+        if (export.Format != TasteExport.FormatName || export.Version != TasteExport.CurrentVersion)
+        {
+            return BadRequest("This is not a Taste export file, or it comes from a newer version of Taste.");
+        }
+
+        if (export.Titles.Count > TransferService.MaxTitles)
+        {
+            return BadRequest("The file has too many titles.");
+        }
+
+        var result = await _transfer.ImportAsync(user, export, cancellationToken).ConfigureAwait(false);
+        _discovery.Invalidate(user.Id);
         return result;
     }
 

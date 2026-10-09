@@ -23,6 +23,7 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
         serviceCollection.AddSingleton<PromptService>();
         serviceCollection.AddSingleton<RecommendationService>();
         serviceCollection.AddSingleton<CalibrationService>();
+        serviceCollection.AddSingleton<TransferService>();
         serviceCollection.AddHostedService<StartupService>();
     }
 }

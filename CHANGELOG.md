@@ -2,6 +2,10 @@
 
 Versions use Jellyfin's four-part plugin numbering.
 
+## 0.6.1.0
+
+- Export and import on the Profile tab: move your stars, thumbs, "Not for me" titles, and calibration answers to another server. Titles are matched by TMDB, IMDb, or TVDB id; import only fills gaps and never replaces a rating already on the server.
+
 ## 0.6.0.0
 
 First public release. It sums up the private versions 0.1 to 0.5, which ran on a single home server.
