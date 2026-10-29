@@ -2,6 +2,10 @@
 
 Versions use Jellyfin's four-part plugin numbering.
 
+## 0.6.3.0
+
+- Home rows stay underneath a featured player such as MediaBar when they finish loading. If you have already scrolled, the page no longer jumps so the new rows paint over the player.
+
 ## 0.6.2.0
 
 - The web script now loads on every page view. Taste adds its own loader to Jellyfin Web's page as it is served, instead of relying on JavaScript Injector, which on some servers never ran it: the home rows, home order, and header button only appeared after opening the Taste page, and were gone again after a refresh. JavaScript Injector and File Transformation are no longer needed; the old "Taste rating dialog" entry is removed from JavaScript Injector at startup.

@@ -56,12 +56,12 @@ Without any of them, only *Movies for you* and *Shows for you* appear.
 1. Download `jellyfin-plugin-taste_<version>.zip` from the [Releases page](https://github.com/Bungu5/jellyfin-taste-plugin/releases) and check it against the `.md5` or `.sha256` file next to it.
 2. Stop Jellyfin.
 3. Unzip it into a new folder named `Taste_<version>` inside Jellyfin's `plugins` folder. Typical locations:
-   - Debian or Ubuntu packages: `/var/lib/jellyfin/plugins/Taste_0.6.2.0/`
-   - Official Docker image: `/config/plugins/Taste_0.6.2.0/` inside the container
-   - Windows: `%PROGRAMDATA%\Jellyfin\Server\plugins\Taste_0.6.2.0\`
+   - Debian or Ubuntu packages: `/var/lib/jellyfin/plugins/Taste_0.6.3.0/`
+   - Official Docker image: `/config/plugins/Taste_0.6.3.0/` inside the container
+   - Windows: `%PROGRAMDATA%\Jellyfin\Server\plugins\Taste_0.6.3.0\`
 
    The folder should contain `Jellyfin.Plugin.Taste.dll` and `meta.json`. If you are upgrading, remove the old `Taste_*` folder.
-4. Make sure the Jellyfin service user can read the files, for example `sudo chown -R jellyfin:jellyfin /var/lib/jellyfin/plugins/Taste_0.6.2.0`.
+4. Make sure the Jellyfin service user can read the files, for example `sudo chown -R jellyfin:jellyfin /var/lib/jellyfin/plugins/Taste_0.6.3.0`.
 5. Start Jellyfin. After the first page load, the log should show `Taste: added the web loader to Jellyfin Web`.
 6. Open Dashboard, Plugins, Taste, and fill in the settings you want.
 7. Reload Jellyfin Web in your browser (a hard refresh, Ctrl+F5, is safest).

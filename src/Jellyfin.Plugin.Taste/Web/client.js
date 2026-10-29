@@ -1467,6 +1467,82 @@
         }, 1500);
     }
 
+    // The home page scrolls inside .page (or the document), not the hero. MediaBar and similar
+    // featured-player plugins take that player out of the flow (#slides-container is position:absolute)
+    // and push .homeSectionsContainer down with margin-top. Scroll anchoring then sees a late Taste row
+    // as content inserted above the anchor and scrolls that gap away, so the rows paint over the player.
+    function homeScroller(node) {
+        var el = node && node.isConnected ? node.parentElement : null;
+        var fallback = null;
+        while (el && el !== document.body && el !== document.documentElement) {
+            var oy = window.getComputedStyle(el).overflowY;
+            if (oy === 'auto' || oy === 'scroll' || oy === 'overlay') {
+                if (!fallback) {
+                    fallback = el;
+                }
+                // Skip short shelves (horizontal poster rows) and only claim a real vertical scroller.
+                if (el.clientHeight > 200 && el.scrollHeight > el.clientHeight + 40) {
+                    return el;
+                }
+            }
+            el = el.parentElement;
+        }
+        var root = document.scrollingElement || document.documentElement;
+        if (root && root.scrollHeight > root.clientHeight + 40) {
+            return root;
+        }
+        return fallback || root;
+    }
+
+    function viewTopOf(scroller) {
+        if (!scroller || scroller === document.body || scroller === document.documentElement || scroller === document.scrollingElement) {
+            return 0;
+        }
+        return scroller.getBoundingClientRect().top;
+    }
+
+    // Hold scroll while a row is inserted or grows, unless its spot is already above the viewport
+    // (the person scrolled past it and should stay where they are).
+    function keepHomeScroll(probe, mutate) {
+        if (probe && probe.nodeType !== 1) {
+            probe = probe.parentElement;
+        }
+        var scroller = homeScroller(probe);
+        var above = probe && probe.isConnected && scroller
+            && probe.getBoundingClientRect().top < viewTopOf(scroller) - 1;
+        if (!scroller || above) {
+            mutate();
+            return;
+        }
+        var scrollTop = scroller.scrollTop;
+        var locks = Number(scroller.dataset.tasteAnchorLocks || '0');
+        if (locks === 0) {
+            scroller.dataset.tasteOverflowAnchor = scroller.style.overflowAnchor || '';
+            scroller.style.overflowAnchor = 'none';
+        }
+        scroller.dataset.tasteAnchorLocks = String(locks + 1);
+        try {
+            mutate();
+        } finally {
+            requestAnimationFrame(release);
+        }
+
+        function release() {
+            // Anchoring jumps by a row or more. A smaller change during this frame is the person scrolling.
+            if (scroller.scrollTop - scrollTop > 24) {
+                scroller.scrollTop = scrollTop;
+            }
+            var left = Number(scroller.dataset.tasteAnchorLocks || '1') - 1;
+            if (left <= 0) {
+                scroller.style.overflowAnchor = scroller.dataset.tasteOverflowAnchor || '';
+                delete scroller.dataset.tasteOverflowAnchor;
+                delete scroller.dataset.tasteAnchorLocks;
+            } else {
+                scroller.dataset.tasteAnchorLocks = String(left);
+            }
+        }
+    }
+
     // One slot per switched-on Taste row, keyed like the layout ("taste:movies").
     function loadHomeRows(layout, status, done) {
         var slots = {};
@@ -1482,8 +1558,10 @@
             slots[tasteKey(row)] = slot;
             getJson('Taste/Recommendations', { shelf: row.shelf }).then(function (result) {
                 if (result.Items && result.Items.length) {
-                    slot.replaceChildren(homeSection(row, result.Items, status));
-                    checkScrollers(slot);
+                    keepHomeScroll(slot, function () {
+                        slot.replaceChildren(homeSection(row, result.Items, status));
+                        checkScrollers(slot);
+                    });
                 }
             }).catch(function (err) {
                 console.debug('Taste: home row ' + row.shelf + ' failed', err);
@@ -1535,8 +1613,13 @@
             }
             var target = prev ? prev.nextSibling : container.firstChild;
             if (target !== slot) {
-                container.insertBefore(slot, target);
-                checkScrollers(slot);
+                // An empty slot is in place before the request returns. If this one is already filled
+                // (layout refresh, or Home was redrawn after the request), insert it without scrolling
+                // the hero gap away.
+                keepHomeScroll(slot.isConnected ? slot : (target || prev || container), function () {
+                    container.insertBefore(slot, target);
+                    checkScrollers(slot);
+                });
             }
             prev = slot;
         });
@@ -1581,10 +1664,14 @@
                     Object.keys(state.slots).forEach(function (key) {
                         var old = state.slots[key];
                         if (fresh[key] && old.parentNode) {
-                            old.replaceWith(fresh[key]);
-                            checkScrollers(fresh[key]);
-                        } else {
-                            old.remove();
+                            keepHomeScroll(old, function () {
+                                old.replaceWith(fresh[key]);
+                                checkScrollers(fresh[key]);
+                            });
+                        } else if (old.parentNode) {
+                            keepHomeScroll(old, function () {
+                                old.remove();
+                            });
                         }
                     });
                     state.slots = fresh;
