@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -24,12 +25,20 @@ public sealed record MdbScore(double? Score, double? ImdbRating, int ImdbVotes, 
 }
 
 /// <summary>
+/// One catalog response. <see cref="Available"/> is false when MDBList refused or failed the call, including a
+/// failure remembered from earlier in this process.
+/// </summary>
+public readonly record struct MdbCatalog(IReadOnlyList<TmdbRef> Titles, bool Available);
+
+/// <summary>
 /// Reads MDBList with a personal API key (free tier: 1,000 calls a day). Batch score lookups count as one call
-/// each, and every title's scores are cached for three days, so a full rebuild costs a handful of calls.
+/// each, and every title's scores are cached for three days. Each catalog URL is fetched once and shared; a
+/// failed catalog call is remembered so it is not repeated per person or per page view.
 /// </summary>
 public sealed class MdbListClient
 {
     private const string BaseUrl = "https://api.mdblist.com";
+    private const string FailedMarker = "failed";
     private const int BatchSize = 100;
     private static readonly TimeSpan ScoreMaxAge = TimeSpan.FromDays(3);
     private static readonly TimeSpan CatalogMaxAge = TimeSpan.FromHours(12);
@@ -37,17 +46,25 @@ public sealed class MdbListClient
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly TasteStore _store;
     private readonly ILogger<MdbListClient> _logger;
+    private readonly Func<string>? _apiKey;
+    private readonly ConcurrentDictionary<string, Task<MdbCatalog>> _catalogFlights = new(StringComparer.Ordinal);
 
     public MdbListClient(IHttpClientFactory httpClientFactory, TasteStore store, ILogger<MdbListClient> logger)
+        : this(httpClientFactory, store, logger, null)
+    {
+    }
+
+    internal MdbListClient(IHttpClientFactory httpClientFactory, TasteStore store, ILogger<MdbListClient> logger, Func<string>? apiKey)
     {
         _httpClientFactory = httpClientFactory;
         _store = store;
         _logger = logger;
+        _apiKey = apiKey;
     }
 
     public bool IsConfigured => ApiKey.Length > 0;
 
-    private static string ApiKey => Plugin.Instance?.Configuration.MdbListApiKey?.Trim() ?? string.Empty;
+    private string ApiKey => _apiKey?.Invoke() ?? Plugin.Instance?.Configuration.MdbListApiKey?.Trim() ?? string.Empty;
 
     /// <summary>
     /// Gets scores for TMDB titles, keyed <c>movie:123</c> / <c>tv:456</c>. Titles MDBList does not know are missing.
@@ -104,8 +121,10 @@ public sealed class MdbListClient
 
     /// <summary>
     /// Gets MDBList's catalog: titles released in a date range with at least a given score, best first.
+    /// The same URL is fetched once and shared. A refused call is remembered for twelve hours and is not
+    /// requested again for each person or page view.
     /// </summary>
-    public async Task<IReadOnlyList<TmdbRef>> GetCatalogAsync(
+    public async Task<MdbCatalog> GetCatalogAsync(
         string mediaType,
         DateTime? releasedFrom,
         DateTime? releasedTo,
@@ -115,7 +134,7 @@ public sealed class MdbListClient
     {
         if (!IsConfigured)
         {
-            return [];
+            return new MdbCatalog([], false);
         }
 
         string Date(DateTime value) => value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
@@ -142,21 +161,67 @@ public sealed class MdbListClient
         }
 
         var path = $"/catalog/{(mediaType == "movie" ? "movie" : "show")}?" + string.Join('&', query);
-        var json = _store.GetCached("mdb:" + path, CatalogMaxAge);
+        var cacheKey = "mdb:" + path;
+        var cached = ReadCatalog(cacheKey, mediaType);
+        if (cached is { } hit)
+        {
+            return hit;
+        }
+
+        var flight = _catalogFlights.GetOrAdd(cacheKey, _ => FetchCatalogAsync(path, cacheKey, mediaType));
+        try
+        {
+            return await flight.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            if (flight.IsCompleted)
+            {
+                _catalogFlights.TryRemove(new KeyValuePair<string, Task<MdbCatalog>>(cacheKey, flight));
+            }
+        }
+    }
+
+    private MdbCatalog? ReadCatalog(string cacheKey, string mediaType)
+    {
+        var json = _store.GetCached(cacheKey, CatalogMaxAge);
         if (json is null)
         {
-            json = await SendAsync(new HttpRequestMessage(HttpMethod.Get, BaseUrl + path + "&apikey=" + Uri.EscapeDataString(ApiKey)), path, cancellationToken)
-                .ConfigureAwait(false);
-            if (json is null)
-            {
-                return [];
-            }
+            return null;
+        }
 
-            _store.PutCached("mdb:" + path, json);
+        if (json == FailedMarker)
+        {
+            return new MdbCatalog([], false);
         }
 
         using var document = JsonDocument.Parse(json);
-        return ParseCatalog(mediaType, document.RootElement);
+        return new MdbCatalog(ParseCatalog(mediaType, document.RootElement), true);
+    }
+
+    private async Task<MdbCatalog> FetchCatalogAsync(string path, string cacheKey, string mediaType)
+    {
+        var again = ReadCatalog(cacheKey, mediaType);
+        if (again is { } hit)
+        {
+            return hit;
+        }
+
+        var request = new HttpRequestMessage(HttpMethod.Get, BaseUrl + path + "&apikey=" + Uri.EscapeDataString(ApiKey));
+        var (json, httpFailure) = await SendAsync(request, path, CancellationToken.None).ConfigureAwait(false);
+        if (json is null)
+        {
+            if (httpFailure)
+            {
+                _store.PutCached(cacheKey, FailedMarker);
+            }
+
+            return new MdbCatalog([], false);
+        }
+
+        _store.PutCached(cacheKey, json);
+        using var document = JsonDocument.Parse(json);
+        return new MdbCatalog(ParseCatalog(mediaType, document.RootElement), true);
     }
 
     internal static Dictionary<string, MdbScore> ParseScores(JsonElement root)
@@ -318,7 +383,7 @@ public sealed class MdbListClient
         {
             Content = JsonContent.Create(new { ids }),
         };
-        var json = await SendAsync(request, path, cancellationToken).ConfigureAwait(false);
+        var (json, _) = await SendAsync(request, path, cancellationToken).ConfigureAwait(false);
         if (json is null)
         {
             return null;
@@ -334,7 +399,11 @@ public sealed class MdbListClient
         return scores;
     }
 
-    private async Task<string?> SendAsync(HttpRequestMessage request, string path, CancellationToken cancellationToken)
+    /// <summary>
+    /// The body of a successful call, or null. <c>HttpFailure</c> is true only for an HTTP error status, which is
+    /// safe to remember. A dropped connection is not.
+    /// </summary>
+    private async Task<(string? Json, bool HttpFailure)> SendAsync(HttpRequestMessage request, string path, CancellationToken cancellationToken)
     {
         using (request)
         {
@@ -344,19 +413,29 @@ public sealed class MdbListClient
                 using var response = await client.SendAsync(request, cancellationToken).ConfigureAwait(false);
                 if (!response.IsSuccessStatusCode)
                 {
-                    _logger.LogWarning("MDBList {Path} returned {Status}", path, (int)response.StatusCode);
-                    return null;
+                    var status = (int)response.StatusCode;
+                    if (FailureLog.TryBegin("mdb:" + path + ":" + status.ToString(CultureInfo.InvariantCulture)))
+                    {
+                        _logger.LogWarning("MDBList {Path} returned {Status}", path, status);
+                    }
+
+                    return (null, true);
                 }
 
                 var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
                 using var check = JsonDocument.Parse(json);
-                return json;
+                FailureLog.Clear("mdb:" + path + ":");
+                return (json, false);
             }
             catch (Exception ex) when (ex is HttpRequestException or JsonException
                                        || (ex is TaskCanceledException && !cancellationToken.IsCancellationRequested))
             {
-                _logger.LogWarning(ex, "MDBList {Path} failed", path);
-                return null;
+                if (FailureLog.TryBegin("mdb:" + path + ":exc"))
+                {
+                    _logger.LogWarning(ex, "MDBList {Path} failed", path);
+                }
+
+                return (null, false);
             }
         }
     }

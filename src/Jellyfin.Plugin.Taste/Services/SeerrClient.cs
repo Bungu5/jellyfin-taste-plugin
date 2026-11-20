@@ -1,7 +1,9 @@
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Net.Http.Json;
 using System.Text.Json;
 using Jellyfin.Database.Implementations.Entities;
+using Jellyfin.Plugin.Taste.Data;
 using MediaBrowser.Common.Net;
 using Microsoft.Extensions.Logging;
 
@@ -17,29 +19,52 @@ public sealed record SeerrRequestResult(bool Ok, string Message);
 /// </summary>
 public sealed class SeerrClient
 {
+    private const string FailedMarker = "failed";
     private static readonly TimeSpan CacheFor = TimeSpan.FromMinutes(10);
     private static readonly TimeSpan StatusCacheFor = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan TitleFailureFor = TimeSpan.FromDays(7);
 
     private readonly IHttpClientFactory _httpClientFactory;
+    private readonly TasteStore _store;
     private readonly ILogger<SeerrClient> _logger;
+    private readonly Func<bool>? _configured;
+    private readonly Func<string>? _baseUrl;
+    private readonly Func<string>? _apiKey;
     private readonly Lock _cacheLock = new();
+    private readonly ConcurrentDictionary<string, Task<string?>> _flights = new(StringComparer.Ordinal);
     private (DateTime Fetched, List<JsonElement> Users)? _users;
     private readonly Dictionary<int, (DateTime Fetched, IReadOnlyList<SeerrRequest> Requests)> _requests = new();
     private (DateTime Fetched, IReadOnlySet<string> Titles)? _requested;
 
-    public SeerrClient(IHttpClientFactory httpClientFactory, ILogger<SeerrClient> logger)
+    public SeerrClient(IHttpClientFactory httpClientFactory, TasteStore store, ILogger<SeerrClient> logger)
+        : this(httpClientFactory, store, logger, null, null, null)
+    {
+    }
+
+    internal SeerrClient(
+        IHttpClientFactory httpClientFactory,
+        TasteStore store,
+        ILogger<SeerrClient> logger,
+        Func<bool>? configured,
+        Func<string>? baseUrl,
+        Func<string>? apiKey)
     {
         _httpClientFactory = httpClientFactory;
+        _store = store;
         _logger = logger;
+        _configured = configured;
+        _baseUrl = baseUrl;
+        _apiKey = apiKey;
     }
 
     public bool IsConfigured
-        => !string.IsNullOrWhiteSpace(Plugin.Instance?.Configuration.SeerrUrl)
-           && !string.IsNullOrWhiteSpace(Plugin.Instance?.Configuration.SeerrApiKey);
+        => _configured?.Invoke()
+           ?? (!string.IsNullOrWhiteSpace(Plugin.Instance?.Configuration.SeerrUrl)
+               && !string.IsNullOrWhiteSpace(Plugin.Instance?.Configuration.SeerrApiKey));
 
-    private static string BaseUrl => Plugin.Instance!.Configuration.SeerrUrl.Trim().TrimEnd('/');
+    private string BaseUrl => (_baseUrl?.Invoke() ?? Plugin.Instance!.Configuration.SeerrUrl).Trim().TrimEnd('/');
 
-    private static string ApiKey => Plugin.Instance!.Configuration.SeerrApiKey.Trim();
+    private string ApiKey => _apiKey?.Invoke() ?? Plugin.Instance!.Configuration.SeerrApiKey.Trim();
 
     /// <summary>
     /// Finds the Seerr user that signed in with this Jellyfin account.
@@ -243,11 +268,53 @@ public sealed class SeerrClient
     }
 
     /// <summary>
-    /// Gets a Seerr API response body as text, or null on any failure.
+    /// Gets a Seerr API response body as text, or null on any failure. A failed title lookup
+    /// (<c>/api/v1/movie/{id}</c> or <c>/api/v1/tv/{id}</c>) is remembered and not called again on the next rebuild.
     /// </summary>
     internal async Task<string?> GetRawAsync(string pathAndQuery, CancellationToken cancellationToken)
     {
-        if (!IsConfigured)
+        if (!IsConfigured || FailedTitle(pathAndQuery))
+        {
+            return null;
+        }
+
+        var flight = _flights.GetOrAdd(pathAndQuery, _ => FetchRawAsync(pathAndQuery));
+        try
+        {
+            return await flight.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            if (flight.IsCompleted)
+            {
+                _flights.TryRemove(new KeyValuePair<string, Task<string?>>(pathAndQuery, flight));
+            }
+        }
+    }
+
+    /// <summary>
+    /// True for <c>/api/v1/movie/123</c> and <c>/api/v1/tv/456</c>, not for recommendations or discover lists.
+    /// </summary>
+    internal static bool IsTitleLookup(string pathAndQuery)
+    {
+        var path = pathAndQuery.Split('?', 2)[0].TrimEnd('/');
+        var parts = path.Split('/');
+        return parts.Length == 5
+               && parts[1] == "api"
+               && parts[2] == "v1"
+               && parts[3] is "movie" or "tv"
+               && parts[4].Length > 0
+               && parts[4].All(char.IsAsciiDigit);
+    }
+
+    private bool FailedTitle(string pathAndQuery)
+        => IsTitleLookup(pathAndQuery) && _store.GetCached(TitleFailureKey(pathAndQuery), TitleFailureFor) is not null;
+
+    private static string TitleFailureKey(string pathAndQuery) => "seerr-failed:" + pathAndQuery.Split('?', 2)[0];
+
+    private async Task<string?> FetchRawAsync(string pathAndQuery)
+    {
+        if (FailedTitle(pathAndQuery))
         {
             return null;
         }
@@ -256,19 +323,33 @@ public sealed class SeerrClient
         using var request = CreateRequest(HttpMethod.Get, pathAndQuery);
         try
         {
-            using var response = await client.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            using var response = await client.SendAsync(request, CancellationToken.None).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode)
             {
-                _logger.LogWarning("Seerr {Path} returned {Status}", pathAndQuery, (int)response.StatusCode);
+                var status = (int)response.StatusCode;
+                if (FailureLog.TryBegin("seerr:" + pathAndQuery + ":" + status.ToString(CultureInfo.InvariantCulture)))
+                {
+                    _logger.LogWarning("Seerr {Path} returned {Status}", pathAndQuery, status);
+                }
+
+                if (IsTitleLookup(pathAndQuery))
+                {
+                    _store.PutCached(TitleFailureKey(pathAndQuery), FailedMarker);
+                }
+
                 return null;
             }
 
-            return await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            FailureLog.Clear("seerr:" + pathAndQuery + ":");
+            return await response.Content.ReadAsStringAsync(CancellationToken.None).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is HttpRequestException
-                                   || (ex is TaskCanceledException && !cancellationToken.IsCancellationRequested))
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
         {
-            _logger.LogWarning(ex, "Seerr {Path} failed", pathAndQuery);
+            if (FailureLog.TryBegin("seerr:" + pathAndQuery + ":exc"))
+            {
+                _logger.LogWarning(ex, "Seerr {Path} failed", pathAndQuery);
+            }
+
             return null;
         }
     }
@@ -301,7 +382,7 @@ public sealed class SeerrClient
             ? number
             : null;
 
-    private static HttpRequestMessage CreateRequest(HttpMethod method, string pathAndQuery, int? asUser = null)
+    private HttpRequestMessage CreateRequest(HttpMethod method, string pathAndQuery, int? asUser = null)
     {
         var request = new HttpRequestMessage(method, BaseUrl + pathAndQuery);
         request.Headers.Add("X-Api-Key", ApiKey);

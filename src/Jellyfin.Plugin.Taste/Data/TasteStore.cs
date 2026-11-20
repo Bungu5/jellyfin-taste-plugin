@@ -221,7 +221,8 @@ public sealed class TasteStore
     }
 
     /// <summary>
-    /// Deletes cached responses fetched before <paramref name="cutoffUtc"/>.
+    /// Deletes cached responses fetched before <paramref name="cutoffUtc"/>. Saved discovery rows are left in
+    /// place; they stay until that person's taste or the library counts change.
     /// </summary>
     /// <returns>How many entries were deleted.</returns>
     public int PruneCache(DateTime cutoffUtc)
@@ -230,7 +231,8 @@ public sealed class TasteStore
         {
             using var connection = Open();
             using var command = connection.CreateCommand();
-            command.CommandText = "DELETE FROM tmdb_cache WHERE fetched_utc < $cutoff";
+            command.CommandText =
+                "DELETE FROM tmdb_cache WHERE fetched_utc < $cutoff AND cache_key NOT LIKE 'discover-rows:%'";
             command.Parameters.AddWithValue("$cutoff", cutoffUtc.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture));
             return command.ExecuteNonQuery();
         }

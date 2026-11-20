@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Jellyfin.Plugin.Taste.Scoring;
 using Jellyfin.Plugin.Taste.Services;
 
@@ -219,6 +220,46 @@ public class DiscoveryTests
         Assert.Equal(rec, Assert.Single(back.Get(true, "tv").Items));
         Assert.Equal("Nothing", back.Get(true, "movie").Notice);
         Assert.Equal("Nothing", back.Get(false, "tv").Notice);
+    }
+
+    [Fact]
+    public void SavedRowsStayWhenTasteAndLibraryCountsMatch()
+    {
+        var rows = SampleRows() with { CountsKnown = true, TitleCount = 870, IngredientCount = 7426 };
+
+        Assert.True(DiscoveryService.IsCurrent(rows, rows.Version, 870, 7426));
+        Assert.False(DiscoveryService.IsCurrent(rows, rows.Version, 871, 7426));
+        Assert.False(DiscoveryService.IsCurrent(rows, rows.Version, 870, 7427));
+        Assert.False(DiscoveryService.IsCurrent(rows with { Stale = true }, rows.Version, 870, 7426));
+        Assert.False(DiscoveryService.IsCurrent(rows, "v6:2:BB", 870, 7426));
+    }
+
+    [Fact]
+    public void RowsSavedBeforeCountsWereRecordedAreStillCurrent()
+    {
+        var node = JsonNode.Parse(JsonSerializer.Serialize(SampleRows()))!.AsObject();
+        node.Remove("CountsKnown");
+        node.Remove("TitleCount");
+        node.Remove("IngredientCount");
+        var back = node.Deserialize<DiscoveryService.Rows>()!;
+
+        Assert.False(back.CountsKnown);
+        Assert.True(DiscoveryService.IsCurrent(back, back.Version, 870, 7426));
+    }
+
+    [Fact]
+    public void LibraryIndexSkipsWhenTitleAndIngredientCountsMatch()
+    {
+        Assert.True(LibraryIndex.CountsUnchanged(870, 7426, 870, 7426));
+        Assert.False(LibraryIndex.CountsUnchanged(870, 7426, 871, 7426));
+        Assert.False(LibraryIndex.CountsUnchanged(870, 7426, 870, 7000));
+        Assert.False(LibraryIndex.CountsUnchanged(0, 0, 0, 0));
+    }
+
+    private static DiscoveryService.Rows SampleRows()
+    {
+        var empty = new RecommendationRow([], "Nothing");
+        return new DiscoveryService.Rows(Now, "v6:3:AA", false, empty, empty, empty, empty);
     }
 
     [Fact]

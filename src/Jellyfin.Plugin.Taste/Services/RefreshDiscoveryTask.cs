@@ -6,8 +6,9 @@ using Microsoft.Extensions.Logging;
 namespace Jellyfin.Plugin.Taste.Services;
 
 /// <summary>
-/// Rebuilds everyone's "new" and "worth requesting" rows ahead of time, so opening Taste does not wait on TMDB,
-/// and drops cached responses no reader would still accept.
+/// Keeps everyone's "new" and "worth requesting" rows ready. A person is rebuilt only when their taste or the
+/// library's title and ingredient counts have changed. Cached HTTP responses older than a month are dropped;
+/// saved discovery rows are not.
 /// </summary>
 public sealed class RefreshDiscoveryTask : IScheduledTask
 {
@@ -33,7 +34,7 @@ public sealed class RefreshDiscoveryTask : IScheduledTask
 
     public string Key => "TasteRefreshDiscovery";
 
-    public string Description => "Finds new and older titles outside the library for each person, so the Taste rows open instantly.";
+    public string Description => "Updates titles outside the library when someone's taste or the library counts have changed, so the Taste rows open instantly.";
 
     public string Category => "Taste";
 
@@ -46,12 +47,16 @@ public sealed class RefreshDiscoveryTask : IScheduledTask
         }
 
         var users = _userManager.GetUsers().ToList();
+        var rebuilt = 0;
         for (var i = 0; i < users.Count; i++)
         {
             cancellationToken.ThrowIfCancellationRequested();
             try
             {
-                await _discovery.RefreshAsync(users[i], cancellationToken).ConfigureAwait(false);
+                if (await _discovery.RefreshAsync(users[i], cancellationToken).ConfigureAwait(false))
+                {
+                    rebuilt++;
+                }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -60,6 +65,11 @@ public sealed class RefreshDiscoveryTask : IScheduledTask
 
             progress.Report(100.0 * (i + 1) / users.Count);
         }
+
+        _logger.LogInformation(
+            "Taste: discovery refresh rebuilt {Rebuilt} of {Count} people",
+            rebuilt,
+            users.Count);
     }
 
     public IEnumerable<TaskTriggerInfo> GetDefaultTriggers()
