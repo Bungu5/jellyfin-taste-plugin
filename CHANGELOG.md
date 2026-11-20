@@ -2,6 +2,10 @@
 
 Versions use Jellyfin's four-part plugin numbering.
 
+## 0.6.4.0
+
+- Opening Taste and the six-hour refresh no longer repeat the same failed MDBList and Seerr calls for every person, or rebuild discovery when that person's taste and the library counts have not changed. Rows stay as they are until those inputs change.
+
 ## 0.6.3.0
 
 - Home rows stay underneath a featured player such as MediaBar when they finish loading. If you have already scrolled, the page no longer jumps so the new rows paint over the player.
