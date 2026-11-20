@@ -21,8 +21,8 @@ namespace Jellyfin.Plugin.Taste.Services;
 /// <para>Each passes taste gates (anime, animation, languages, niche TV), then a quality gate (MDBList's merged
 /// IMDb/RT/Metacritic score when available, else a vote-count-aware TMDB rating). Survivors are scored on the
 /// fans-also-liked strength, ingredient overlap, and quality.</para>
-/// <para>Rows are kept per person (in memory and in the plugin database) and served straight away; a stale row is
-/// rebuilt in the background while the old one shows.</para>
+/// <para>Rows are kept per person (in memory and in the plugin database) until their taste changes or the library's
+/// title and ingredient counts change. A row that is out of date is rebuilt in the background while the old one shows.</para>
 /// </remarks>
 public sealed class DiscoveryService
 {
@@ -38,8 +38,6 @@ public sealed class DiscoveryService
     private const int Concurrency = 10;
     private const int AnimationGenre = 16;
     private const string StoreKeyPrefix = "discover-rows:";
-    private static readonly TimeSpan FreshFor = TimeSpan.FromMinutes(30);
-    private static readonly TimeSpan KeepFor = TimeSpan.FromDays(2);
 
     private readonly LibraryIndex _index;
     private readonly ProfileService _profiles;
@@ -108,13 +106,14 @@ public sealed class DiscoveryService
             return new RecommendationRow([], "Rate a few titles first, then this row fills in.");
         }
 
+        var snapshot = await _index.GetAsync(cancellationToken).ConfigureAwait(false);
         var version = Version(profile);
-        var rows = Cached(user.Id);
+        var rows = Prepared(user.Id, version, snapshot.Titles.Count, snapshot.Idf.Count);
         if (rows is null || !rows.Version.StartsWith(Algorithm + ":", StringComparison.Ordinal))
         {
             rows = await BuildShared(user, profile, version).WaitAsync(cancellationToken).ConfigureAwait(false);
         }
-        else if (rows.Stale || rows.Version != version || DateTime.UtcNow - rows.Built > FreshFor)
+        else if (!IsCurrent(rows, version, snapshot.Titles.Count, snapshot.Idf.Count))
         {
             _ = BuildShared(user, profile, version);
         }
@@ -123,27 +122,51 @@ public sealed class DiscoveryService
     }
 
     /// <summary>
-    /// Rebuilds a person's rows if they are missing or out of date. Used by the scheduled task.
+    /// Rebuilds a person's rows when their taste or the library counts have changed. Returns true when a rebuild ran.
+    /// Used by the scheduled task, which leaves a current row where it is.
     /// </summary>
-    public async Task RefreshAsync(User user, CancellationToken cancellationToken)
+    public async Task<bool> RefreshAsync(User user, CancellationToken cancellationToken)
     {
         if (Plugin.Instance?.Configuration.EnableDiscover != true || !_tmdb.IsConfigured)
         {
-            return;
+            return false;
         }
 
         var profile = await _profiles.GetAsync(user, cancellationToken).ConfigureAwait(false);
         if (!profile.HasTaste)
         {
-            return;
+            return false;
         }
 
+        var snapshot = await _index.GetAsync(cancellationToken).ConfigureAwait(false);
         var version = Version(profile);
-        var rows = Cached(user.Id);
-        if (rows is null || rows.Stale || rows.Version != version || DateTime.UtcNow - rows.Built > FreshFor)
+        var titles = snapshot.Titles.Count;
+        var ingredients = snapshot.Idf.Count;
+        var rows = Prepared(user.Id, version, titles, ingredients);
+        if (IsCurrent(rows, version, titles, ingredients))
         {
-            await BuildShared(user, profile, version).WaitAsync(cancellationToken).ConfigureAwait(false);
+            return false;
         }
+
+        await BuildShared(user, profile, version).WaitAsync(cancellationToken).ConfigureAwait(false);
+        return true;
+    }
+
+    /// <summary>
+    /// A saved row can be served as it is. Unknown library counts (rows saved before counts were recorded) still match,
+    /// so installing this build does not recompute anyone whose taste is unchanged.
+    /// </summary>
+    internal static bool IsCurrent(Rows? rows, string version, int titles, int ingredients)
+    {
+        if (rows is null
+            || rows.Stale
+            || rows.Version != version
+            || !rows.Version.StartsWith(Algorithm + ":", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return !rows.CountsKnown || (rows.TitleCount == titles && rows.IngredientCount == ingredients);
     }
 
     /// <summary>
@@ -311,10 +334,10 @@ public sealed class DiscoveryService
     {
         if (_rows.TryGetValue(userId, out var rows))
         {
-            return DateTime.UtcNow - rows.Built < KeepFor ? rows : null;
+            return rows;
         }
 
-        var json = _store.GetCached(StoreKeyPrefix + userId.ToString("N"), KeepFor);
+        var json = _store.GetCached(StoreKeyPrefix + userId.ToString("N"), TimeSpan.FromDays(3650));
         if (json is null)
         {
             return null;
@@ -337,6 +360,29 @@ public sealed class DiscoveryService
         return rows;
     }
 
+    /// <summary>
+    /// Records the library counts on a row that was saved before counts existed, without rebuilding it.
+    /// An empty snapshot is not recorded, so a library that has not finished loading cannot pin the row at zero.
+    /// </summary>
+    private Rows? Prepared(Guid userId, string version, int titles, int ingredients)
+    {
+        var rows = Cached(userId);
+        if (rows is null || rows.CountsKnown || rows.Stale || rows.Version != version || titles <= 0)
+        {
+            return rows;
+        }
+
+        rows = rows with { CountsKnown = true, TitleCount = titles, IngredientCount = ingredients };
+        Save(userId, rows);
+        return rows;
+    }
+
+    private void Save(Guid userId, Rows rows)
+    {
+        _rows[userId] = rows;
+        _store.PutCached(StoreKeyPrefix + userId.ToString("N"), JsonSerializer.Serialize(rows));
+    }
+
     private Task<Rows> BuildShared(User user, UserProfile profile, string version)
         => _building.GetOrAdd(
             user.Id,
@@ -347,9 +393,8 @@ public sealed class DiscoveryService
         try
         {
             var started = DateTime.UtcNow;
-            var rows = await BuildAsync(profile, version, CancellationToken.None).ConfigureAwait(false);
-            _rows[user.Id] = rows;
-            _store.PutCached(StoreKeyPrefix + user.Id.ToString("N"), JsonSerializer.Serialize(rows));
+            var (rows, mdb) = await BuildAsync(profile, version, CancellationToken.None).ConfigureAwait(false);
+            Save(user.Id, rows);
             _logger.LogInformation(
                 "Taste: discovery rows for {User}: new {NewMovies} movies / {NewShows} shows, older {OlderMovies} movies / {OlderShows} shows in {Seconds:0.0}s (titles via {Source}; Trakt {Trakt}, MDBList {Mdb})",
                 user.Username,
@@ -360,7 +405,7 @@ public sealed class DiscoveryService
                 (DateTime.UtcNow - started).TotalSeconds,
                 _tmdb.Source,
                 _trakt.IsConfigured ? "on" : "off",
-                _mdb.IsConfigured ? "on" : "off");
+                mdb);
             return rows;
         }
         catch (Exception ex)
@@ -392,13 +437,13 @@ public sealed class DiscoveryService
         return new RecommendationRow(items, items.Count > 0 ? null : row.Notice ?? "Nothing outside the library fits yet.");
     }
 
-    private async Task<Rows> BuildAsync(UserProfile profile, string version, CancellationToken cancellationToken)
+    private async Task<(Rows Rows, string Mdb)> BuildAsync(UserProfile profile, string version, CancellationToken cancellationToken)
     {
         var now = DateTime.UtcNow;
         var since = now.Date.AddDays(-NewWindowDays);
         var shape = Shape(profile);
         var snapshot = await _index.GetAsync(cancellationToken).ConfigureAwait(false);
-        var candidates = await GatherAsync(profile, shape, since, now, cancellationToken).ConfigureAwait(false);
+        var (candidates, mdb) = await GatherAsync(profile, shape, since, now, cancellationToken).ConfigureAwait(false);
 
         var maxGenre = profile.Vector
             .Where(p => Features.Category(p.Key) == Features.Genre)
@@ -418,7 +463,17 @@ public sealed class DiscoveryService
         Task<RecommendationRow> Rank(bool fresh, string mediaType)
             => RankAsync(usable.Where(c => c.Ref.MediaType == mediaType).ToList(), fresh, since, now, profile, shape, snapshot, maxGenre, throttle, cancellationToken);
         var rows = await Task.WhenAll(Rank(true, "movie"), Rank(true, "tv"), Rank(false, "movie"), Rank(false, "tv")).ConfigureAwait(false);
-        return new Rows(DateTime.UtcNow, version, false, rows[0], rows[1], rows[2], rows[3]);
+        return (new Rows(
+            DateTime.UtcNow,
+            version,
+            false,
+            rows[0],
+            rows[1],
+            rows[2],
+            rows[3],
+            snapshot.Titles.Count > 0,
+            snapshot.Titles.Count,
+            snapshot.Idf.Count), mdb);
     }
 
     private async Task<RecommendationRow> RankAsync(
@@ -515,7 +570,7 @@ public sealed class DiscoveryService
     private static string Reason(UserProfile profile, Candidate candidate, IReadOnlyDictionary<string, double> vector)
         => candidate.Because.Count == 0 ? ReasonWriter.Explain(profile, vector) : ReasonWriter.FansAlsoLiked(candidate.Because);
 
-    private async Task<Dictionary<string, Candidate>> GatherAsync(
+    private async Task<(Dictionary<string, Candidate> Candidates, string Mdb)> GatherAsync(
         UserProfile profile,
         TasteShape shape,
         DateTime since,
@@ -523,6 +578,8 @@ public sealed class DiscoveryService
         CancellationToken cancellationToken)
     {
         var candidates = new Dictionary<string, Candidate>(StringComparer.Ordinal);
+        var catalogCalls = 0;
+        var catalogOk = 0;
         var neighbours = await _neighbours.GetAsync(profile, cancellationToken).ConfigureAwait(false);
         foreach (var (key, neighbour) in neighbours)
         {
@@ -561,8 +618,8 @@ public sealed class DiscoveryService
 
             if (_mdb.IsConfigured)
             {
-                queries.Add(() => _mdb.GetCatalogAsync(mediaType, since, now.Date, 62, languages, cancellationToken));
-                queries.Add(() => _mdb.GetCatalogAsync(mediaType, null, since, 75, languages, cancellationToken));
+                queries.Add(Catalog(mediaType, since, now.Date, 62));
+                queries.Add(Catalog(mediaType, null, since, 75));
             }
 
             var genres = profile.Vector
@@ -627,7 +684,22 @@ public sealed class DiscoveryService
             }
         })).ConfigureAwait(false);
 
-        return candidates;
+        var mdb = catalogCalls == 0 ? "off" : catalogOk == 0 ? "failed" : "on";
+        return (candidates, mdb);
+
+        Func<Task<IReadOnlyList<TmdbRef>>> Catalog(string mediaType, DateTime? from, DateTime? to, int minScore)
+            => async () =>
+            {
+                var page = await _mdb.GetCatalogAsync(mediaType, from, to, minScore, languages, cancellationToken)
+                    .ConfigureAwait(false);
+                Interlocked.Increment(ref catalogCalls);
+                if (page.Available)
+                {
+                    Interlocked.Increment(ref catalogOk);
+                }
+
+                return page.Titles;
+            };
     }
 
     private static bool InWindow(DateTime? released, bool fresh, DateTime since, DateTime now)
@@ -700,7 +772,10 @@ public sealed class DiscoveryService
         RecommendationRow NewMovies,
         RecommendationRow NewShows,
         RecommendationRow OlderMovies,
-        RecommendationRow OlderShows)
+        RecommendationRow OlderShows,
+        bool CountsKnown = false,
+        int TitleCount = 0,
+        int IngredientCount = 0)
     {
         public RecommendationRow Get(bool fresh, string mediaType) => (fresh, mediaType) switch
         {

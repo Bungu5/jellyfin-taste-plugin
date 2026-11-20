@@ -128,6 +128,18 @@ public sealed class TasteStoreTests : IDisposable
     }
 
     [Fact]
+    public void PruneKeepsDiscoveryRows()
+    {
+        var store = new TasteStore(_path);
+        store.PutCached("discover-rows:person", "{\"Version\":\"v6:1:AA\"}");
+        store.PutCached("mdb:/catalog/movie", "failed");
+
+        Assert.Equal(1, store.PruneCache(DateTime.UtcNow.AddMinutes(1)));
+        Assert.Equal("{\"Version\":\"v6:1:AA\"}", store.GetCached("discover-rows:person", TimeSpan.FromDays(1)));
+        Assert.Null(store.GetCached("mdb:/catalog/movie", TimeSpan.FromDays(1)));
+    }
+
+    [Fact]
     public void KeysAreStable()
     {
         var id = Guid.Parse("0f8fad5b-d9cb-469f-a165-70867728950e");

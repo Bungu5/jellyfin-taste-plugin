@@ -32,7 +32,7 @@ public sealed class LibraryTitle
 
     public IReadOnlyDictionary<string, double> Vector { get; set; } = new Dictionary<string, double>();
 
-    public int EpisodeCount { get; init; }
+    public int EpisodeCount { get; set; }
 }
 
 public sealed class LibrarySnapshot
@@ -58,17 +58,21 @@ public sealed class LibrarySnapshot
 }
 
 /// <summary>
-/// Caches every movie and series with its ingredients. Rebuilt every 30 minutes, or sooner after the
-/// library changes (at most once every 2 minutes, so a big scan does not trigger a rebuild per item).
+/// Caches every movie and series with its ingredients. The cache stays in place while the title count and the
+/// ingredient count are unchanged. A movie or series being added, removed, or edited can rebuild it, and a scan
+/// waits at least two minutes so it does not rebuild once per item. When the new counts match, the existing
+/// snapshot is kept.
 /// </summary>
 public sealed class LibraryIndex : IDisposable
 {
-    private static readonly TimeSpan MaxAge = TimeSpan.FromMinutes(30);
     private static readonly TimeSpan MinAgeWhenChanged = TimeSpan.FromMinutes(2);
+    private static readonly ItemUpdateType MetadataChange =
+        ItemUpdateType.MetadataImport | ItemUpdateType.MetadataDownload | ItemUpdateType.MetadataEdit;
 
     private readonly ILibraryManager _libraryManager;
     private readonly ILogger<LibraryIndex> _logger;
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly object _episodeCounts = new();
     private volatile LibrarySnapshot? _snapshot;
     private volatile bool _changed;
 
@@ -76,23 +80,30 @@ public sealed class LibraryIndex : IDisposable
     {
         _libraryManager = libraryManager;
         _logger = logger;
-        _libraryManager.ItemAdded += OnLibraryChanged;
-        _libraryManager.ItemRemoved += OnLibraryChanged;
-        _libraryManager.ItemUpdated += OnLibraryChanged;
+        _libraryManager.ItemAdded += OnItemAdded;
+        _libraryManager.ItemRemoved += OnItemRemoved;
+        _libraryManager.ItemUpdated += OnItemUpdated;
     }
 
     public void Dispose()
     {
-        _libraryManager.ItemAdded -= OnLibraryChanged;
-        _libraryManager.ItemRemoved -= OnLibraryChanged;
-        _libraryManager.ItemUpdated -= OnLibraryChanged;
+        _libraryManager.ItemAdded -= OnItemAdded;
+        _libraryManager.ItemRemoved -= OnItemRemoved;
+        _libraryManager.ItemUpdated -= OnItemUpdated;
         _gate.Dispose();
     }
+
+    /// <summary>
+    /// True when a rebuild would describe the same library: both counts are present and neither moved.
+    /// An empty library is not treated as settled, so a scan that has not loaded yet is tried again.
+    /// </summary>
+    internal static bool CountsUnchanged(int titles, int ingredients, int nextTitles, int nextIngredients)
+        => titles > 0 && titles == nextTitles && ingredients == nextIngredients;
 
     public async Task<LibrarySnapshot> GetAsync(CancellationToken cancellationToken)
     {
         var current = _snapshot;
-        if (IsFresh(current))
+        if (IsSettled(current))
         {
             return current!;
         }
@@ -101,15 +112,15 @@ public sealed class LibraryIndex : IDisposable
         try
         {
             current = _snapshot;
-            if (IsFresh(current))
+            if (IsSettled(current))
             {
                 return current!;
             }
 
             _changed = false;
-            current = await Task.Run(Build, cancellationToken).ConfigureAwait(false);
-            _snapshot = current;
-            return current;
+            var built = await Task.Run(() => Build(current), cancellationToken).ConfigureAwait(false);
+            _snapshot = built;
+            return built;
         }
         finally
         {
@@ -117,28 +128,73 @@ public sealed class LibraryIndex : IDisposable
         }
     }
 
-    private bool IsFresh(LibrarySnapshot? snapshot)
+    private bool IsSettled(LibrarySnapshot? snapshot)
     {
         if (snapshot is null)
         {
             return false;
         }
 
-        var age = DateTime.UtcNow - snapshot.BuiltUtc;
-        if (age >= MaxAge)
+        if (snapshot.Titles.Count == 0)
         {
-            return false;
+            return !_changed && DateTime.UtcNow - snapshot.BuiltUtc < MinAgeWhenChanged;
         }
 
-        var stale = _changed || snapshot.Titles.Count == 0;
-        return !stale || age < MinAgeWhenChanged;
+        return !_changed || DateTime.UtcNow - snapshot.BuiltUtc < MinAgeWhenChanged;
     }
 
-    private void OnLibraryChanged(object? sender, ItemChangeEventArgs e)
+    private void OnItemAdded(object? sender, ItemChangeEventArgs e)
     {
-        if (e.Item is Movie or Series or Episode)
+        if (e.Item is Movie or Series)
         {
             _changed = true;
+            return;
+        }
+
+        if (e.Item is Episode episode)
+        {
+            AdjustEpisode(episode, 1);
+        }
+    }
+
+    private void OnItemRemoved(object? sender, ItemChangeEventArgs e)
+    {
+        if (e.Item is Movie or Series)
+        {
+            _changed = true;
+            return;
+        }
+
+        if (e.Item is Episode episode)
+        {
+            AdjustEpisode(episode, -1);
+        }
+    }
+
+    private void OnItemUpdated(object? sender, ItemChangeEventArgs e)
+    {
+        if (e.Item is Movie or Series && (e.UpdateReason & MetadataChange) != 0)
+        {
+            _changed = true;
+        }
+    }
+
+    private void AdjustEpisode(Episode episode, int delta)
+    {
+        if ((episode.ParentIndexNumber ?? 1) <= 0)
+        {
+            return;
+        }
+
+        var snapshot = _snapshot;
+        if (snapshot is null || !snapshot.Titles.TryGetValue(episode.SeriesId, out var series))
+        {
+            return;
+        }
+
+        lock (_episodeCounts)
+        {
+            series.EpisodeCount = Math.Max(0, series.EpisodeCount + delta);
         }
     }
 
@@ -164,7 +220,7 @@ public sealed class LibraryIndex : IDisposable
         };
     }
 
-    private LibrarySnapshot Build()
+    private LibrarySnapshot Build(LibrarySnapshot? previous)
     {
         var started = DateTime.UtcNow;
         var items = _libraryManager.GetItemList(new InternalItemsQuery
@@ -237,6 +293,11 @@ public sealed class LibraryIndex : IDisposable
         foreach (var title in titles.Values)
         {
             title.Vector = snapshot.Vectorize(title.RawFeatures);
+        }
+
+        if (CountsUnchanged(previous?.Titles.Count ?? 0, previous?.Idf.Count ?? 0, titles.Count, idf.Count))
+        {
+            return previous!;
         }
 
         _logger.LogInformation(
