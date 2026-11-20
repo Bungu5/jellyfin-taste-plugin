@@ -47,7 +47,7 @@ public sealed class MdbListClient
     private readonly TasteStore _store;
     private readonly ILogger<MdbListClient> _logger;
     private readonly Func<string>? _apiKey;
-    private readonly ConcurrentDictionary<string, Task<MdbCatalog>> _catalogFlights = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, Lazy<Task<MdbCatalog>>> _catalogFlights = new(StringComparer.Ordinal);
 
     public MdbListClient(IHttpClientFactory httpClientFactory, TasteStore store, ILogger<MdbListClient> logger)
         : this(httpClientFactory, store, logger, null)
@@ -168,16 +168,20 @@ public sealed class MdbListClient
             return hit;
         }
 
-        var flight = _catalogFlights.GetOrAdd(cacheKey, _ => FetchCatalogAsync(path, cacheKey, mediaType));
+        var flight = _catalogFlights.GetOrAdd(
+            cacheKey,
+            _ => new Lazy<Task<MdbCatalog>>(
+                () => FetchCatalogAsync(path, cacheKey, mediaType),
+                LazyThreadSafetyMode.ExecutionAndPublication));
         try
         {
-            return await flight.WaitAsync(cancellationToken).ConfigureAwait(false);
+            return await flight.Value.WaitAsync(cancellationToken).ConfigureAwait(false);
         }
         finally
         {
-            if (flight.IsCompleted)
+            if (flight.IsValueCreated && flight.Value.IsCompleted)
             {
-                _catalogFlights.TryRemove(new KeyValuePair<string, Task<MdbCatalog>>(cacheKey, flight));
+                _catalogFlights.TryRemove(new KeyValuePair<string, Lazy<Task<MdbCatalog>>>(cacheKey, flight));
             }
         }
     }

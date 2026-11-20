@@ -31,7 +31,7 @@ public sealed class SeerrClient
     private readonly Func<string>? _baseUrl;
     private readonly Func<string>? _apiKey;
     private readonly Lock _cacheLock = new();
-    private readonly ConcurrentDictionary<string, Task<string?>> _flights = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, Lazy<Task<string?>>> _flights = new(StringComparer.Ordinal);
     private (DateTime Fetched, List<JsonElement> Users)? _users;
     private readonly Dictionary<int, (DateTime Fetched, IReadOnlyList<SeerrRequest> Requests)> _requests = new();
     private (DateTime Fetched, IReadOnlySet<string> Titles)? _requested;
@@ -278,16 +278,18 @@ public sealed class SeerrClient
             return null;
         }
 
-        var flight = _flights.GetOrAdd(pathAndQuery, _ => FetchRawAsync(pathAndQuery));
+        var flight = _flights.GetOrAdd(
+            pathAndQuery,
+            _ => new Lazy<Task<string?>>(() => FetchRawAsync(pathAndQuery), LazyThreadSafetyMode.ExecutionAndPublication));
         try
         {
-            return await flight.WaitAsync(cancellationToken).ConfigureAwait(false);
+            return await flight.Value.WaitAsync(cancellationToken).ConfigureAwait(false);
         }
         finally
         {
-            if (flight.IsCompleted)
+            if (flight.IsValueCreated && flight.Value.IsCompleted)
             {
-                _flights.TryRemove(new KeyValuePair<string, Task<string?>>(pathAndQuery, flight));
+                _flights.TryRemove(new KeyValuePair<string, Lazy<Task<string?>>>(pathAndQuery, flight));
             }
         }
     }
